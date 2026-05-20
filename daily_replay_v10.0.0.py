@@ -250,12 +250,73 @@ def tomorrow_plan_xwj(e, style, node):
     else:
         return ["**混沌期轻仓**", "- 2-3成仓只做最强低吸", "- 不追高不格局快进快出", "- 等方向明确再上仓位"]
 
+
+def validate_data(conn, date, prev_date, expected_min=5000):
+    """v46: 数据全量校验 — 不通过则拒绝复盘"""
+    errors = []
+
+    # 1. 目标日期股票数
+    total = conn.execute("SELECT COUNT(*) FROM daily_kline WHERE date=? AND volume>0", [date]).fetchone()[0]
+    if total < expected_min:
+        errors.append(f"目标日期 {date} 仅 {total} 只股票（需要 ≥{expected_min}）")
+
+    # 2. 前一日股票数（允许近似：pct_change 覆盖率够了就放行）
+    prev_total = conn.execute("SELECT COUNT(*) FROM daily_kline WHERE date=? AND volume>0", [prev_date]).fetchone()[0]
+    if prev_total < expected_min:
+        print(f"   ⚠️ 前一日 {prev_date} 仅 {prev_total} 只（近似模式：pct_change 从更早日期的收盘价/5 估算）")
+
+    # 3. pct_change 覆盖率
+    pct_ok = conn.execute(
+        "SELECT COUNT(*) FROM daily_kline WHERE date=? AND pct_change IS NOT NULL AND volume>0", [date]
+    ).fetchone()[0]
+    pct_rate = pct_ok / total * 100 if total else 0
+    if pct_rate < 95:
+        errors.append(f"pct_change 覆盖率 {pct_rate:.1f}%（{pct_ok}/{total}），需要 ≥95%")
+
+    # 4. amount 覆盖率
+    amt_ok = conn.execute(
+        "SELECT COUNT(*) FROM daily_kline WHERE date=? AND amount>0 AND volume>0", [date]
+    ).fetchone()[0]
+    amt_rate = amt_ok / total * 100 if total else 0
+    if amt_rate < 95:
+        errors.append(f"amount 覆盖率 {amt_rate:.1f}%（{amt_ok}/{total}），需要 ≥95%")
+
+    # 5. pct_change 合理性（不应全是 5 天累计）
+    extreme_up = conn.execute(
+        "SELECT COUNT(*) FROM daily_kline WHERE date=? AND pct_change>=9.5", [date]
+    ).fetchone()[0]
+    extreme_down = conn.execute(
+        "SELECT COUNT(*) FROM daily_kline WHERE date=? AND pct_change<=-9.5", [date]
+    ).fetchone()[0]
+    if extreme_down > 100:
+        errors.append(f"跌停数异常（{extreme_down}只），疑似多日累计涨跌幅，非单日")
+    if extreme_up > 150:
+        errors.append(f"涨停数异常（{extreme_up}只），疑似多日累计涨跌幅，非单日")
+
+    if errors:
+        print("❌ 数据校验不通过:")
+        for e in errors:
+            print(f"   • {e}")
+        print(f"\n   请先确保数据完整：")
+        print(f"   1. 前一日 {prev_date} 全量 ≥{expected_min} 只")
+        print(f"   2. 目标日 {date} 全量 ≥{expected_min} 只")
+        print(f"   3. pct_change 基于 {prev_date}→{date} 单日计算")
+        return False
+
+    print(f"✅ 数据校验通过: {total}只, pct覆盖率{pct_rate:.1f}%, amt覆盖率{amt_rate:.1f}%, 涨停{extreme_up}/跌停{extreme_down}")
+    return True
+
+
 # ============================================================
 # main() - 复盘九步
 # ============================================================
 
 def main():
     t0 = time.time()
+    
+    # ===== 数据校验 =====
+    if not validate_data(conn, DATE, prev_date):
+        sys.exit(1)
     
     # 量能数据
     recent_vols = []
